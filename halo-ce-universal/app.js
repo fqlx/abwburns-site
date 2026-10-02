@@ -48,7 +48,6 @@ can run the game, copies the game data out of the player's disc image
     pendingInviteConnect: null,
     roomTask: Promise.resolve(),
     maps: null,
-    cacheAbort: null,
     dataBusy: false,
     dataTransition: false,
     releaseGameLock: null,
@@ -220,7 +219,7 @@ can run the game, copies the game data out of the player's disc image
     ok = addCheck(webgl2InWorkers(), 'WebGL 2 from a worker (OffscreenCanvas; iOS 17 or later)') && ok;
     ok = await checkGameStorage() && ok;
     // Reserve the Xbox address window only after Play owns the game lock.
-    // Downloads, idle launchers and a second tab need no game-sized memory.
+    // Disc imports, idle launchers and a second tab need no game-sized memory.
     ok = addCheck(typeof WebAssembly !== 'undefined' && typeof WebAssembly.Memory === 'function', 'WebAssembly memory') && ok;
     if (navigator.storage && navigator.storage.estimate) {
       try {
@@ -244,12 +243,6 @@ can run the game, copies the game data out of the player's disc image
 
   function hasFullMaps() {
     return !!state.maps && HaloCache.expected.every(name => state.maps.files.includes(name));
-  }
-
-  function downloadedDetail(maps) {
-    const bytes = maps.requiredBytes ?? maps.bytes;
-    return bytes < 1e9 ? `${(bytes / 1e6).toFixed(1)} MB saved in this browser. Ready to play.` :
-      `${(bytes / 1e9).toFixed(2)} GB saved in this browser. Ready to play.`;
   }
 
   async function mapsState() {
@@ -280,49 +273,18 @@ can run the game, copies the game data out of the player's disc image
       const connect = state.pendingInviteConnect;
       state.pendingInviteConnect = null;
       connect();
-    } else if (state.checksReady && state.maps && !state.dataBusy && state.pendingInviteConnect && !state.dataTransition) {
-      downloadMaps();
+    } else if (state.checksReady && state.pendingInviteConnect && !state.dataBusy && !state.dataTransition) {
+      $('step-data').hidden = false;
     }
-  }
-
-  function showDownload(progress) {
-    $('download-panel').hidden = false;
-    $('download-panel').dataset.state = progress.state;
-    $('download-title').textContent = progress.title;
-    $('download-detail').textContent = progress.detail;
-    $('download-progress').value = progress.fraction;
-    $('download-percent').textContent = `${Math.floor(progress.fraction * 100)}%`;
   }
 
   function setDataBusy(busy) {
     state.dataBusy = busy;
     $('iso-file').disabled = busy;
     $('delete-data').disabled = busy;
-    $('download-retry').hidden = busy || !!state.maps;
-    $('download-cancel').hidden = !state.cacheAbort;
     updatePlayButton();
     connectPendingInvite();
     maybeQuickPlay();
-  }
-
-  async function downloadMaps() {
-    if (state.dataBusy || state.started) return;
-    state.cacheAbort = new AbortController();
-    setDataBusy(true);
-    try {
-      const maps = await HaloCache.download({ required: requiredMaps(),
-        signal: state.cacheAbort.signal, onProgress: showDownload });
-      showSteps(maps);
-    } catch (error) {
-      log('game data: ' + error.message);
-      if (!state.cacheAbort.signal.aborted && $('download-panel').dataset.state !== 'error') {
-        showDownload({ state: 'error', title: 'Download interrupted', detail: error.message, fraction: 0 });
-      }
-      showSteps(await mapsState());
-    } finally {
-      state.cacheAbort = null;
-      setDataBusy(false);
-    }
   }
 
   function extract(file) {
@@ -374,8 +336,6 @@ can run the game, copies the game data out of the player's disc image
       log(`extracted ${result.files} files, ${result.bytes} bytes`);
       $('progress-text').textContent = 'Done.';
       showSteps(await mapsState());
-      if (state.maps) showDownload({ state: 'ready', title: 'Already downloaded',
-        detail: downloadedDetail(state.maps), fraction: 1 });
     } catch (error) {
       $('progress-text').textContent = error.message;
       log('extraction failed: ' + error.message);
@@ -487,7 +447,6 @@ can run the game, copies the game data out of the player's disc image
       });
     } catch (error) { toast(error.message, 6000); return; }
     showSteps(await mapsState());
-    showDownload({ state: 'paused', title: 'Download needed', detail: 'Download the game again or choose your disc image.', fraction: 0 });
     setDataBusy(false);
   }
 
@@ -604,10 +563,9 @@ can run the game, copies the game data out of the player's disc image
     updatePlayButton();
     unlockInteraction();
     if (!hasFullMaps()) {
-      // The running engine owns the OPFS game lock. Reload before preparing
-      // more maps, and keep the old page from launching a completed download.
+      // The running engine owns the OPFS game lock. Reload to ask for the
+      // remaining maps through a local disc image.
       state.dataTransition = true;
-      state.cacheAbort?.abort();
       const url = new URL(location.href);
       url.searchParams.set('menu', '1');
       url.hash = '';
@@ -938,7 +896,7 @@ can run the game, copies the game data out of the player's disc image
               cancelQuickPlay();
               if (!hasFullMaps()) {
                 if (status.phase === 'menu') openMainMenu();
-                else fatal(status.message + ' Reload to retry multiplayer, or choose Main menu to download the remaining maps.');
+                else fatal(status.message + ' Reload to retry multiplayer, or choose Main menu to import the remaining maps from your disc image.');
               }
             }
           } catch (error) { log('quick play status: ' + error); }
@@ -1013,7 +971,7 @@ can run the game, copies the game data out of the player's disc image
       }
       if (!hasFullMaps() || state.dataBusy) {
         state.pendingInviteConnect = connect;
-        $('invite-status').textContent = 'Preparing game data. The invite will connect when the download finishes.';
+        $('invite-status').textContent = 'Choose your disc image to add the remaining maps before connecting.';
         connectPendingInvite();
         return;
       }
@@ -1145,7 +1103,6 @@ can run the game, copies the game data out of the player's disc image
     // WebRTC rooms would leave its old host/client session running on a new LAN.
     if (state.started || (state.dataBusy && state.manualMode)) {
       state.dataTransition = true;
-      state.cacheAbort?.abort();
       try {
         if (remember) localStorage.setItem('halo-web-room', code);
         localStorage.removeItem('halo-web-room-left');
@@ -1203,7 +1160,6 @@ can run the game, copies the game data out of the player's disc image
     $('online-leave').onclick = () => {
       if (state.started || !hasFullMaps()) {
         state.dataTransition = true;
-        state.cacheAbort?.abort();
         try {
           localStorage.removeItem('halo-web-room');
           localStorage.setItem('halo-web-room-left', '1');
@@ -1355,8 +1311,6 @@ can run the game, copies the game data out of the player's disc image
     }
     $('export-saves').onclick = exportSaves;
     $('delete-data').onclick = deleteData;
-    $('download-retry').onclick = downloadMaps;
-    $('download-cancel').onclick = () => state.cacheAbort?.abort();
     const showLog = async () => {
       $('log-text').textContent = await fullLog();
       $('log-view').hidden = false;
@@ -1415,13 +1369,7 @@ can run the game, copies the game data out of the player's disc image
     if (!ok) return;
     state.checksReady = true;
     showSteps(await mapsState());
-    if (state.maps) {
-      showDownload({ state: 'ready', title: 'Already downloaded',
-        detail: downloadedDetail(state.maps), fraction: 1 });
-      setDataBusy(false);
-    } else {
-      downloadMaps();
-    }
+    setDataBusy(false);
   }
 
   main().catch((error) => {
